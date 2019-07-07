@@ -5,16 +5,20 @@ import logging
 import subprocess
 from pathlib import Path
 from shutil import copy
-from daemonize import Daemonize
+# from daemonize import Daemonize
+from daemoniker import Daemonizer
 import click
+import time
 
-import inotify.adapters
-from inotify.constants import IN_CLOSE_WRITE
-from .rofi import rofi
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+# from .rofi import rofi
+import easygui
 import pyperclip
 from appdirs import user_config_dir
 
-logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO"))
+logging.basicConfig(level=os.environ.get("LOGLEVEL", "DEBUG"))
 log = logging.getLogger('inkscape-figures')
 
 def inkscape(path):
@@ -35,10 +39,12 @@ def create_latex(name, title, indent=0):
 user_dir = Path(user_config_dir("inkscape-figures", "Castel"))
 
 if not user_dir.is_dir():
-    user_dir.mkdir()
+    user_dir.mkdir(parents=True)
 
+roots_flag = user_dir / 'changed.flag'
 roots_file =  user_dir / 'roots'
 template = user_dir / 'template.svg'
+pid_file = user_dir / 'file.pid'
 
 if not roots_file.is_file():
     roots_file.touch()
@@ -61,11 +67,9 @@ def add_root(path):
 def get_roots():
     return [root for root in roots_file.read_text().split('\n') if root != '']
 
-
 @click.group()
 def cli():
     pass
-
 
 @cli.command()
 @click.option('--daemon/--no-daemon', default=True)
@@ -74,54 +78,30 @@ def watch(daemon):
     Watches for figures.
     """
     if daemon:
-        daemon = Daemonize(app='inkscape-figures',
-                           pid='/tmp/inkscape-figures.pid',
-                           action=watch_daemon)
-        daemon.start()
+        with Daemonizer() as (is_setup, daemonizer):
+            is_parent = daemonizer(str(pid_file))
+            if is_parent:
+                log.info("parent will done")
         log.info("Watching figures.")
+        watch_daemon()
     else:
         log.info("Watching figures.")
         watch_daemon()
 
-def watch_daemon():
-    while True:
-        roots = get_roots()
-
-        # Watch the file with contains the paths to watch
-        # When this file changes, we update the watches.
-        i = inotify.adapters.Inotify()
-        i.add_watch(str(roots_file), mask=IN_CLOSE_WRITE)
-
-        # Watch the actual figure directories
-        log.info('Watching directories: ' + ', '.join(get_roots()))
-        for root in roots:
-            try:
-                i.add_watch(root, mask=IN_CLOSE_WRITE)
-            except Exception:
-                log.debug('Could not add root %s', root)
-
-        for event in i.event_gen(yield_nones=False):
-            (_, type_names, path, filename) = event
-
-            # If the file containing figure roots has changes, update the
-            # watches
-            if path == str(roots_file):
-                log.info('The roots file has been updated. Updating watches.')
-                for root in roots:
-                    try:
-                        i.remove_watch(root)
-                        log.debug('Removed root %s', root)
-                    except Exception:
-                        log.debug('Could not remove root %s', root)
-                # Break out of the loop, setting up new watches.
-                break
-
-            # A file has changed
-            path = Path(path) / filename
+class MyHandler(FileSystemEventHandler):
+    def on_modified(self, event):
+        print(f'event type: {event.event_type}  path : {event.src_path}')
+        if event.src_path == str(roots_file):
+            if roots_flag.is_file():
+                roots_flag.unlink()
+            roots_flag.touch()
+        else:
+            path = Path(event.src_path)
+            filename = os.path.basename(event.src_path)
 
             if path.suffix != '.svg':
                 log.debug('File has changed, but is nog an svg')
-                continue
+                return None
 
             log.info('Recompiling %s', filename)
 
@@ -133,15 +113,15 @@ def watch_daemon():
                 'inkscape',
                 '--export-area-page',
                 '--export-dpi', '300',
-                '--export-pdf', pdf_path,
-                '--export-latex', path
+                '--export-pdf', str(pdf_path),
+                '--export-latex', str(path)
             ]
 
             log.debug('Running command:')
             log.debug(' '.join(str(e) for e in command))
 
             # Recompile the svg file
-            completed_process = subprocess.run(command)
+            completed_process = subprocess.run(command, shell=True)
 
             if completed_process.returncode != 0:
                 log.error('Return code %s', completed_process.returncode)
@@ -153,7 +133,27 @@ def watch_daemon():
             pyperclip.copy(create_latex(name, beautify(name)))
 
 
-
+def watch_daemon():
+    while True:
+        log.debug('Loading roots...')
+        if roots_flag.is_file():
+            roots_flag.unlink()
+        event_handler = MyHandler()
+        observer = Observer()
+        observer.schedule(event_handler, path=str(user_dir), recursive=False)
+        roots = get_roots()
+        for root in roots:
+            observer.schedule(event_handler, path=root, recursive=False)
+        log.debug('Start observer...')
+        observer.start()
+        try:
+            while not roots_flag.is_file():
+                time.sleep(1)
+            observer.stop()
+        except KeyboardInterrupt:
+            observer.stop()
+        observer.join()
+        log.debug('end observer...')
 
 @cli.command()
 @click.argument('title')
@@ -171,17 +171,18 @@ def create(title, root):
 
     """
     title = title.strip()
+
     file_name = title.replace(' ', '-').lower() + '.svg'
     figures = Path(root).absolute()
     if not figures.exists():
         figures.mkdir()
 
     figure_path = figures / file_name
-
     # If a file with this name already exists, append a '2'.
-    if figure_path.exists():
-        print(title + ' 2')
-        return
+    while figure_path.exists():
+        title = title + ' 2'
+        file_name = title.replace(' ', '-').lower() + '2.svg'
+        figure_path = figures / file_name
 
     copy(str(template), str(figure_path))
     add_root(figures)
@@ -217,13 +218,14 @@ def edit(root):
     files = sorted(files, key=lambda f: f.stat().st_mtime, reverse=True)
 
     # Open a selection dialog using rofi
-    names = [beautify(f.stem) for f in files]
-    _, index, selected = rofi("Select figure", names)
+    # names = [beautify(f.stem) for f in files]
+    selected = easygui.choicebox("Select figure", choices=files)
 
     if selected:
-        path = files[index]
+        path = figures / selected
         add_root(figures)
-        inkscape(path)
+        print(str(path))
+        inkscape(str(path))
 
 if __name__ == '__main__':
     cli()

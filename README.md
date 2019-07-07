@@ -1,20 +1,18 @@
 # Inkscape figure manager.
 
-A script I use to manage figures for my LaTeX documents.
+A script used to manage figures for my LaTeX documents.
 More information in this [blog post](https://castel.dev/post/lecture-notes-2/).
 
 
 ## Installation
 
-You can install it using pip:
-
+On the root directory, run commands below
 ```
-pip install inkscape-figures
+python setup.py sdist bdist_wheel 
+pip install dist\inkscape_figures-1.0.2-py3-none-any.whl
 ```
 
-You'll also need [rofi](https://github.com/davatorium/rofi).
-
-This script only works on Linux. If you're interested in porting it to Windows/OSX, feel free to make a pull request.
+This script only works on Windows 10.
 
 ## Setup
 

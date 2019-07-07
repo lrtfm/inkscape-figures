@@ -2,7 +2,7 @@ import pathlib
 from setuptools import setup, find_packages
 
 def readme():
-    with open('README.md') as f:
+    with open('README.md', encoding='utf-8') as f:
         return f.read()
 
 setup(
@@ -22,6 +22,6 @@ setup(
     ],
     packages=['inkscapefigures'],
     scripts=['bin/inkscape-figures'],
-    install_requires=['inotify', 'pyperclip', 'click', 'appdirs', 'daemonize'],
+    install_requires=['watchdog', 'pyperclip', 'click', 'appdirs', 'daemoniker', 'easygui'],
     include_package_data=True
 )
